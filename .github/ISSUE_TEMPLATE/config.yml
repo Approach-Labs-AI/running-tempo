@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions & discussion
+    url: https://github.com/Approach-Labs-AI/running-tempo/discussions
+    about: Ask questions, share training setups, or discuss the model here.

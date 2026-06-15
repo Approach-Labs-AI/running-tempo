@@ -1,0 +1,48 @@
+name: Bug report
+description: Something in Tempo isn't working the way you expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to file a bug. Please fill out the sections below.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what actually happened instead?
+      placeholder: I called `GET /api/plan` and the paces came back...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest set of steps that reliably triggers the bug.
+      placeholder: |
+        1. Seed a plan with GMP 6:52
+        2. Call `GET /api/paces`
+        3. Tempo zone is wrong by ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of Tempo does this touch?
+      options:
+        - Engine / training math
+        - API
+        - Dashboard
+        - Strava sync
+        - Google Calendar
+        - Deploy / Val Town
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Environment & context
+      description: Bun version, Val Town branch, anything else relevant. Redact secrets and tokens.
+    validations:
+      required: false
