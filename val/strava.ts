@@ -7,8 +7,17 @@
 // Optional: STRAVA_REDIRECT_URI (else derived from the request origin).
 
 import type { Hono } from 'npm:hono@4'
-import { getActivePlan, insert, query, queryOne, run } from './db.ts'
-import { requireAuth } from './auth.ts'
+import {
+  getActivePlan,
+  getIntegration,
+  insert,
+  linkStravaAthlete,
+  query,
+  queryOne,
+  run,
+  upsertIntegration,
+} from './db.ts'
+import { currentUserId, requireUser } from './session.ts'
 
 const METERS_PER_MILE = 1609.344
 const FEET_PER_METER = 3.28084
@@ -24,10 +33,10 @@ function redirectUri(reqUrl: string): string {
 
 /** Register Strava OAuth routes onto the shared app. */
 export function registerStrava(app: Hono) {
-  // Require a dashboard session before initiating OR completing OAuth, so a
-  // random visitor can't authorize their own Strava into the single-user store.
-  // The callback is a browser redirect and carries the session cookie.
-  app.use('/strava/*', requireAuth)
+  // Strava connects INTO an existing Google session: the athlete is linked to
+  // the signed-in user record. requireUser redirects anonymous visitors to
+  // Google sign-in first, so a stranger can't attach Strava to someone else.
+  app.use('/strava/*', requireUser)
 
   app.get('/strava/connect', (c) => {
     const clientId = Deno.env.get('STRAVA_CLIENT_ID')
@@ -42,6 +51,8 @@ export function registerStrava(app: Hono) {
   })
 
   app.get('/strava/callback', async (c) => {
+    const userId = await currentUserId(c)
+    if (!userId) return c.redirect('/auth/google/login')
     const code = c.req.query('code')
     if (!code) return c.text('missing code', 400)
     const res = await fetch('https://www.strava.com/oauth/token', {
@@ -55,10 +66,12 @@ export function registerStrava(app: Hono) {
       }),
     })
     if (!res.ok) return c.text(`strava token exchange failed: ${await res.text()}`, 502)
-    const tok = await res.json()
-    await storeTokens(tok)
+    const tok = (await res.json()) as StravaToken
+    await storeTokens(userId, tok)
+    // Link the Strava athlete to this user record (the identity join).
+    if (tok.athlete?.id) await linkStravaAthlete(userId, String(tok.athlete.id))
     // Pull recent history immediately so the dashboard isn't empty.
-    await syncStrava()
+    await syncStrava(userId)
     return c.redirect('/settings')
   })
 }
@@ -70,36 +83,24 @@ interface StravaToken {
   athlete?: { id: number }
 }
 
-async function storeTokens(tok: StravaToken): Promise<void> {
-  await run(
-    `INSERT INTO integrations (provider, access_token, refresh_token, expires_at, scope, external_id, updated_at)
-     VALUES ('strava', ?, ?, ?, 'activity:read_all', ?, datetime('now'))
-     ON CONFLICT(provider) DO UPDATE SET
-       access_token = excluded.access_token,
-       refresh_token = excluded.refresh_token,
-       expires_at = excluded.expires_at,
-       external_id = excluded.external_id,
-       updated_at = datetime('now')`,
-    [
-      tok.access_token,
-      tok.refresh_token,
-      tok.expires_at,
-      tok.athlete?.id ? String(tok.athlete.id) : null,
-    ]
-  )
+async function storeTokens(userId: number, tok: StravaToken): Promise<void> {
+  await upsertIntegration(userId, 'strava', {
+    access_token: tok.access_token,
+    refresh_token: tok.refresh_token,
+    expires_at: tok.expires_at,
+    scope: 'activity:read_all',
+    external_id: tok.athlete?.id ? String(tok.athlete.id) : null,
+  })
 }
 
-/** Return a valid access token, refreshing if it's within 60s of expiry. */
-export async function getAccessToken(): Promise<string | null> {
-  const row = await queryOne<{
-    access_token: string
-    refresh_token: string
-    expires_at: number
-  }>(`SELECT access_token, refresh_token, expires_at FROM integrations WHERE provider = 'strava'`)
+/** Return a valid access token for the user, refreshing within 60s of expiry. */
+export async function getAccessToken(userId = 0): Promise<string | null> {
+  const row = await getIntegration(userId, 'strava')
   if (!row) return null
 
   const now = Math.floor(Date.now() / 1000)
   if (row.expires_at > now + 60) return row.access_token
+  if (!row.refresh_token) return null
 
   const res = await fetch('https://www.strava.com/oauth/token', {
     method: 'POST',
@@ -116,7 +117,7 @@ export async function getAccessToken(): Promise<string | null> {
     return null
   }
   const tok = (await res.json()) as StravaToken
-  await storeTokens(tok)
+  await storeTokens(userId, tok)
   return tok.access_token
 }
 
@@ -142,15 +143,18 @@ interface StravaActivity {
  * `afterEpoch` defaults to the active plan's start date.
  * Returns { fetched, runs_upserted, matched }.
  */
-export async function syncStrava(afterEpoch?: number): Promise<{
+export async function syncStrava(
+  userId = 0,
+  afterEpoch?: number
+): Promise<{
   fetched: number
   upserted: number
   matched: number
 }> {
-  const token = await getAccessToken()
+  const token = await getAccessToken(userId)
   if (!token) throw new Error('strava not connected')
 
-  const plan = await getActivePlan()
+  const plan = await getActivePlan(userId)
   const after = afterEpoch ?? (plan ? Math.floor(Date.parse(plan.start_date) / 1000) : 0)
 
   let page = 1
@@ -177,9 +181,9 @@ export async function syncStrava(afterEpoch?: number): Promise<{
       const pace = a.moving_time / miles
       const changed = await insert(
         `INSERT INTO runs
-           (strava_activity_id, date, distance_mi, moving_time_s, avg_pace_s,
+           (user_id, strava_activity_id, date, distance_mi, moving_time_s, avg_pace_s,
             avg_hr, max_hr, elev_gain_ft, name, type, raw_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(strava_activity_id) DO UPDATE SET
            distance_mi = excluded.distance_mi,
            moving_time_s = excluded.moving_time_s,
@@ -189,6 +193,7 @@ export async function syncStrava(afterEpoch?: number): Promise<{
            elev_gain_ft = excluded.elev_gain_ft,
            name = excluded.name`,
         [
+          userId,
           String(a.id),
           date,
           round1(miles),
@@ -211,7 +216,7 @@ export async function syncStrava(afterEpoch?: number): Promise<{
 
   let matched = 0
   if (plan) {
-    matched = await matchRuns(plan.id)
+    matched = await matchRuns(plan.id, userId)
     // Past planned runs with no actual become 'missed' so adherence isn't
     // inflated by silently-skipped sessions. Today is left as 'planned'.
     const today = new Date().toISOString().slice(0, 10)
@@ -225,9 +230,10 @@ export async function syncStrava(afterEpoch?: number): Promise<{
  * workout done. One run per workout; extra runs on a day stay unmatched (still
  * counted in "miles earned"). Returns the number of workouts newly marked done.
  */
-export async function matchRuns(planId: number): Promise<number> {
+export async function matchRuns(planId: number, userId = 0): Promise<number> {
   const runs = await query<{ id: number; date: string }>(
-    `SELECT id, date FROM runs WHERE workout_id IS NULL ORDER BY date`
+    `SELECT id, date FROM runs WHERE workout_id IS NULL AND user_id = ? ORDER BY date`,
+    [userId]
   )
   let matched = 0
   for (const r of runs) {
@@ -260,15 +266,16 @@ export async function reconcileMissed(planId: number, throughDate: string): Prom
   return res[0]?.n ?? 0
 }
 
-export async function stravaStatus(): Promise<{
+export async function stravaStatus(userId = 0): Promise<{
   connected: boolean
   athlete_id: string | null
   last_run: string | null
 }> {
-  const row = await queryOne<{ external_id: string }>(
-    `SELECT external_id FROM integrations WHERE provider = 'strava'`
+  const row = await getIntegration(userId, 'strava')
+  const last = await queryOne<{ date: string }>(
+    `SELECT date FROM runs WHERE user_id = ? ORDER BY date DESC LIMIT 1`,
+    [userId]
   )
-  const last = await queryOne<{ date: string }>(`SELECT date FROM runs ORDER BY date DESC LIMIT 1`)
   return {
     connected: !!row,
     athlete_id: row?.external_id ?? null,

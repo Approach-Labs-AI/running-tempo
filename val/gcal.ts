@@ -7,9 +7,18 @@
 // Optional: GOOGLE_REDIRECT_URI (else derived from request origin).
 
 import type { Hono } from 'npm:hono@4'
-import { getActivePlan, getSetting, query, queryOne, run, Workout } from './db.ts'
+import {
+  getActivePlan,
+  getIntegration,
+  getSetting,
+  query,
+  queryOne,
+  run,
+  upsertIntegration,
+  Workout,
+} from './db.ts'
 import { fmtPace } from './engine.ts'
-import { requireAuth } from './auth.ts'
+import { currentUserId, requireUser } from './session.ts'
 
 const SCOPE = 'https://www.googleapis.com/auth/calendar.events'
 const DEFAULT_RUN_TIME = '06:30' // local wall-clock start for scheduled runs
@@ -20,8 +29,10 @@ function redirectUri(reqUrl: string): string {
 }
 
 export function registerGcal(app: Hono) {
-  // Same as Strava: OAuth connect/callback require a dashboard session.
-  app.use('/gcal/*', requireAuth)
+  // Calendar access is normally granted at Google sign-in (session.ts requests
+  // calendar.events in the same consent). These routes remain for an explicit
+  // re-consent and require a signed-in user.
+  app.use('/gcal/*', requireUser)
 
   app.get('/gcal/connect', (c) => {
     const clientId = Deno.env.get('GOOGLE_CLIENT_ID')
@@ -37,6 +48,8 @@ export function registerGcal(app: Hono) {
   })
 
   app.get('/gcal/callback', async (c) => {
+    const userId = await currentUserId(c)
+    if (!userId) return c.redirect('/auth/google/login')
     const code = c.req.query('code')
     if (!code) return c.text('missing code', 400)
     const res = await fetch('https://oauth2.googleapis.com/token', {
@@ -51,10 +64,10 @@ export function registerGcal(app: Hono) {
       }),
     })
     if (!res.ok) return c.text(`google token exchange failed: ${await res.text()}`, 502)
-    const tok = await res.json()
-    await storeTokens(tok)
-    const plan = await getActivePlan()
-    if (plan) await pushWorkouts(plan.id)
+    const tok = (await res.json()) as GoogleToken
+    await storeTokens(userId, tok)
+    const plan = await getActivePlan(userId)
+    if (plan) await pushWorkouts(plan.id, userId)
     return c.redirect('/settings')
   })
 }
@@ -65,31 +78,19 @@ interface GoogleToken {
   expires_in: number // seconds from now
 }
 
-async function storeTokens(tok: GoogleToken): Promise<void> {
-  const expiresAt = Math.floor(Date.now() / 1000) + (tok.expires_in ?? 3600)
-  // Keep the existing refresh token if Google omits it on re-consent.
-  const existing = await queryOne<{ refresh_token: string }>(
-    `SELECT refresh_token FROM integrations WHERE provider = 'google'`
-  )
-  const refresh = tok.refresh_token ?? existing?.refresh_token ?? null
-  await run(
-    `INSERT INTO integrations (provider, access_token, refresh_token, expires_at, scope, updated_at)
-     VALUES ('google', ?, ?, ?, ?, datetime('now'))
-     ON CONFLICT(provider) DO UPDATE SET
-       access_token = excluded.access_token,
-       refresh_token = excluded.refresh_token,
-       expires_at = excluded.expires_at,
-       updated_at = datetime('now')`,
-    [tok.access_token, refresh, expiresAt, SCOPE]
-  )
+async function storeTokens(userId: number, tok: GoogleToken): Promise<void> {
+  // upsertIntegration preserves the stored refresh token when Google omits it
+  // on re-consent (its refresh_token column uses COALESCE on a null input).
+  await upsertIntegration(userId, 'google', {
+    access_token: tok.access_token,
+    refresh_token: tok.refresh_token ?? null,
+    expires_at: Math.floor(Date.now() / 1000) + (tok.expires_in ?? 3600),
+    scope: SCOPE,
+  })
 }
 
-export async function getAccessToken(): Promise<string | null> {
-  const row = await queryOne<{
-    access_token: string
-    refresh_token: string
-    expires_at: number
-  }>(`SELECT access_token, refresh_token, expires_at FROM integrations WHERE provider = 'google'`)
+export async function getAccessToken(userId = 0): Promise<string | null> {
+  const row = await getIntegration(userId, 'google')
   if (!row) return null
 
   const now = Math.floor(Date.now() / 1000)
@@ -111,7 +112,7 @@ export async function getAccessToken(): Promise<string | null> {
     return null
   }
   const tok = (await res.json()) as GoogleToken
-  await storeTokens(tok)
+  await storeTokens(userId, tok)
   return tok.access_token
 }
 
@@ -125,8 +126,11 @@ export async function getAccessToken(): Promise<string | null> {
  * reminders — these are the morning-of nudge for the MVP.
  * Returns { created, updated }.
  */
-export async function pushWorkouts(planId: number): Promise<{ created: number; updated: number }> {
-  const token = await getAccessToken()
+export async function pushWorkouts(
+  planId: number,
+  userId = 0
+): Promise<{ created: number; updated: number }> {
+  const token = await getAccessToken(userId)
   if (!token) throw new Error('google calendar not connected')
 
   const tz = (await getSetting('timezone')) ?? DEFAULT_TZ
@@ -223,15 +227,16 @@ async function gcalFetch(
   return res.json()
 }
 
-export async function gcalStatus(): Promise<{
+export async function gcalStatus(userId = 0): Promise<{
   connected: boolean
   events_pushed: number
 }> {
-  const row = await queryOne<{ provider: string }>(
-    `SELECT provider FROM integrations WHERE provider = 'google'`
-  )
+  const row = await getIntegration(userId, 'google')
   const count = await queryOne<{ n: number }>(
-    `SELECT COUNT(*) AS n FROM workouts WHERE gcal_event_id IS NOT NULL`
+    `SELECT COUNT(*) AS n FROM workouts
+       WHERE gcal_event_id IS NOT NULL
+         AND plan_id IN (SELECT id FROM plans WHERE user_id = ?)`,
+    [userId]
   )
   return { connected: !!row, events_pushed: count?.n ?? 0 }
 }

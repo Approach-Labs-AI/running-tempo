@@ -36,8 +36,28 @@ export const ZONE_OFFSETS_FROM_GMP = {
 
 // --- row shapes ------------------------------------------------------------
 
+/** A person. Identity is anchored on the Google account (sign-in); Strava is
+ *  linked afterward. `user_id = 0` is reserved for the legacy single-user /
+ *  headless-admin store so pre-multi-user data and the bearer API keep working. */
+export interface User {
+  id: number
+  google_sub: string // stable Google account id (the identity anchor)
+  email: string | null
+  name: string | null
+  strava_athlete_id: string | null // linked once the user connects Strava
+  created_at: string
+}
+
+export interface Session {
+  token: string
+  user_id: number
+  created_at: string
+  expires_at: number // epoch seconds
+}
+
 export interface Plan {
   id: number
+  user_id: number // 0 = legacy/admin single-user store
   race_name: string
   race_date: string // ISO date (YYYY-MM-DD)
   goal_time_s: number // 3:00:00 = 10800
@@ -87,6 +107,7 @@ export interface Workout {
 
 export interface Run {
   id: number
+  user_id: number // 0 = legacy/admin single-user store
   strava_activity_id: string
   workout_id: number | null
   date: string

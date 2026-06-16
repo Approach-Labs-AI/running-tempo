@@ -6,6 +6,7 @@
 import { Hono } from 'npm:hono@4'
 import { initSchema } from './db.ts'
 import { registerApi } from './api.ts'
+import { registerAuth } from './session.ts'
 import { registerStrava } from './strava.ts'
 import { registerGcal } from './gcal.ts'
 import { registerDashboard } from './dashboard.ts'
@@ -23,6 +24,7 @@ app.use('*', async (_c, next) => {
 })
 
 registerApi(app) // /api/*        (Bearer TEMPO_API_SECRET)
+registerAuth(app) // /auth/*      (Google sign-in — end-user identity anchor)
 registerStrava(app) // /strava/*  (OAuth connect + callback)
 registerGcal(app) // /gcal/*      (OAuth connect + callback)
 registerDashboard(app) // /, /calendar, /settings, /sync, /push-calendar, /login (cookie auth)
