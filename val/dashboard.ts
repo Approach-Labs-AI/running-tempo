@@ -17,6 +17,7 @@ import {
 import { onTrackVerdict, paceZones, fmtPace } from './engine.ts'
 import { stravaStatus, syncStrava } from './strava.ts'
 import { gcalStatus, pushWorkouts } from './gcal.ts'
+import { getReviews } from './review.ts'
 import { COOKIE, requireAuth, sessionToken } from './auth.ts'
 import {
   OverviewData,
@@ -163,5 +164,6 @@ async function overviewData(plan: Plan): Promise<OverviewData> {
     },
     week: week ?? null,
     workouts,
+    reviews: await getReviews(),
   }
 }

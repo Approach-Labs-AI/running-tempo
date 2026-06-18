@@ -105,6 +105,25 @@ export interface Workout {
   created_at: string
 }
 
+/** A stored weekly training review (headless Sunday reconcile). */
+export interface Review {
+  id: number
+  user_id: number
+  plan_id: number
+  week_index: number
+  week_start: string // ISO Monday
+  week_end: string // ISO Sunday
+  planned_mi: number
+  earned_mi: number
+  adherence_pct: number
+  sessions_done: number
+  sessions_planned: number
+  avg_easy_pace_s: number | null
+  verdict: string // on-track | watch | behind
+  summary: string
+  created_at: string
+}
+
 export interface Run {
   id: number
   user_id: number // 0 = legacy/admin single-user store

@@ -2,7 +2,7 @@
 // no DB access here (dashboard.ts fetches data and passes it in).
 
 import { fmtPace } from './engine.ts'
-import { Plan, PlanWeek, Workout } from './db.ts'
+import { Plan, PlanWeek, Review, Workout } from './db.ts'
 
 /** HTML-escape user-supplied strings (race name, workout title/description, focus). */
 function esc(s: string | null | undefined): string {
@@ -76,6 +76,7 @@ export interface OverviewData {
   }
   week: PlanWeek | null
   workouts: Workout[]
+  reviews: Review[]
 }
 
 export function renderOverview(d: OverviewData): string {
@@ -116,7 +117,35 @@ export function renderOverview(d: OverviewData): string {
       .join('')}</table>`
     : `<p class="muted">No detailed week for today yet.</p>`
 
-  return shell('Overview', '/', cards + zones + thisWeek)
+  const reviews = renderReviews(d.reviews)
+
+  return shell('Overview', '/', cards + zones + thisWeek + reviews)
+}
+
+/** Headless weekly reviews (latest summary + recent history). */
+function renderReviews(reviews: Review[]): string {
+  if (!reviews.length) {
+    return `<h2>Weekly review</h2>
+    <p class="muted">No review yet — the Sunday reconcile runs automatically,
+    or trigger one with <code>POST /api/review/run</code>.</p>`
+  }
+  const latest = reviews[0]
+  const rows = reviews
+    .map(
+      (r) => `<tr>
+      <td>Wk ${r.week_index}</td>
+      <td class="muted">${r.week_start.slice(5)}–${r.week_end.slice(5)}</td>
+      <td>${r.earned_mi} / ${r.planned_mi} mi</td>
+      <td>${r.adherence_pct}%</td>
+      <td>${r.avg_easy_pace_s != null ? fmtPace(r.avg_easy_pace_s) : '—'}</td>
+      <td><span class="pill ${r.verdict}">${r.verdict}</span></td>
+    </tr>`
+    )
+    .join('')
+  return `<h2>Weekly review</h2>
+  <p style="margin:0 0 14px">${esc(latest.summary)}</p>
+  <table><tr><th>Week</th><th>Dates</th><th>Miles</th><th>Adherence</th><th>Avg easy</th><th></th></tr>
+  ${rows}</table>`
 }
 
 export function renderCalendar(plan: Plan, weeks: PlanWeek[]): string {

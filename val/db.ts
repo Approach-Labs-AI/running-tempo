@@ -167,6 +167,26 @@ export async function initSchema(): Promise<void> {
     value TEXT
   )`)
 
+  // Weekly review snapshots (one row per plan week; headless Sunday reconcile).
+  await run(`CREATE TABLE IF NOT EXISTS reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL DEFAULT 0,
+    plan_id INTEGER NOT NULL,
+    week_index INTEGER NOT NULL,
+    week_start TEXT NOT NULL,
+    week_end TEXT NOT NULL,
+    planned_mi REAL NOT NULL DEFAULT 0,
+    earned_mi REAL NOT NULL DEFAULT 0,
+    adherence_pct INTEGER NOT NULL DEFAULT 0,
+    sessions_done INTEGER NOT NULL DEFAULT 0,
+    sessions_planned INTEGER NOT NULL DEFAULT 0,
+    avg_easy_pace_s INTEGER,
+    verdict TEXT,
+    summary TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(plan_id, week_index)
+  )`)
+
   // Migrate any DB created before multi-user (adds columns / re-keys in place).
   await ensureColumn('plans', 'user_id', 'INTEGER NOT NULL DEFAULT 0')
   await ensureColumn('runs', 'user_id', 'INTEGER NOT NULL DEFAULT 0')
